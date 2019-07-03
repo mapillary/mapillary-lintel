@@ -18,3 +18,4 @@ import _lintel
 
 loadvid = _lintel.loadvid
 loadvid_frame_nums = _lintel.loadvid_frame_nums
+saveframes_frame_nums = _lintel.saveframes_frame_nums

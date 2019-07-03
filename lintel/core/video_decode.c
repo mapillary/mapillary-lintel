@@ -31,6 +31,102 @@
  * VID_DECODE_FFMPEG_ERR if an FFmpeg error occurred..
  */
 static int32_t
+save_frame(struct video_stream_context *vid_ctx, uint8_t *output_dir, int32_t saved_frames)
+{
+    int ret;
+    AVFrame *frame;
+    AVPacket pkt;
+
+    av_register_all();
+
+    AVCodecContext *mpeg_codec_context = vid_ctx->codec_context;
+
+    AVCodec* jpeg_codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+    if (!jpeg_codec)
+    {
+        printf("Codec not found\n");
+        exit(1);
+    }
+
+    AVCodecContext* jpeg_codec_ctx = avcodec_alloc_context3(jpeg_codec);
+    if (!jpeg_codec_ctx)
+    {
+        printf("Could not allocate video codec context\n");
+        exit(1);
+    }
+
+    jpeg_codec_ctx->bit_rate = mpeg_codec_context->bit_rate;
+    jpeg_codec_ctx->width = mpeg_codec_context->width;
+    jpeg_codec_ctx->height = mpeg_codec_context->height;
+    jpeg_codec_ctx->time_base = (AVRational){1,25};
+    jpeg_codec_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
+
+    if (avcodec_open2(jpeg_codec_ctx, jpeg_codec, NULL) < 0)
+    {
+        printf("Could not open codec\n");
+        exit(1);
+    }
+
+
+    frame = av_frame_alloc();
+    if (!frame)
+    {
+        printf("Could not allocate video frame\n");
+        exit(1);
+    }
+    frame->format = mpeg_codec_context->pix_fmt;
+    frame->width  = mpeg_codec_context->width;
+    frame->height = mpeg_codec_context->height;
+
+    ret = av_image_alloc(frame->data, frame->linesize, jpeg_codec_ctx->width, jpeg_codec_ctx->height, jpeg_codec_ctx->pix_fmt, 32);
+    if (ret < 0)
+    {
+        printf("Could not allocate raw picture buffer\n");
+        exit(1);
+    }
+
+    av_init_packet(&pkt);
+    pkt.data = NULL;
+    pkt.size = 0;
+
+    frame->pts = 1;
+    
+    frame = vid_ctx->frame;
+    int got_output = 0;
+    ret = avcodec_send_frame(jpeg_codec_ctx,frame);
+    if (ret < 0)
+    {
+        char error_code[100];
+        sprintf(error_code, "%d", ret);
+        printf(error_code);
+        printf("Error sending frame\n");
+        exit(1);
+    }
+    ret = avcodec_receive_packet(jpeg_codec_ctx,&pkt);
+    if (ret < 0)
+    {
+        char error_code[100];
+        sprintf(error_code, "%d", ret);
+        printf(error_code);
+        printf("Error receiving frame\n");
+        exit(1);
+    }
+
+    char output_name[200];
+    sprintf(output_name,"%s/frame_%d.jpg",output_dir,saved_frames);
+    printf(output_name);
+    FILE* f = fopen(&output_name, "wb");
+    fwrite(pkt.data, 1, pkt.size, f);
+    av_free_packet(&pkt);
+    fclose(f);
+    printf("saved image\n");
+    printf("closing codec\n");
+    avcodec_close(jpeg_codec_ctx);
+    av_free(jpeg_codec_ctx);
+    printf("freed codecs\n");
+    return 0;
+}
+static int32_t
 receive_frame(struct video_stream_context *vid_ctx)
 {
         AVPacket packet;
@@ -660,6 +756,95 @@ decode_video_from_frame_nums(uint8_t *dest,
                                                sws_context,
                                                copied_bytes,
                                                bytes_per_row);
+        }
+
+out_free_frame_rgb_and_sws:
+        av_freep(frame_rgb->data);
+        av_frame_free(&frame_rgb);
+        sws_freeContext(sws_context);
+}
+void
+save_video_from_frame_nums(struct video_stream_context *vid_ctx,
+                             int32_t num_requested_frames,
+                             const int32_t *frame_numbers,
+                             bool should_seek,
+                             uint8_t *output_dir)
+{
+        printf("save_video_from_frame_nums called");
+        if (num_requested_frames <= 0)
+                return;
+
+        AVCodecContext *codec_context = vid_ctx->codec_context;
+        struct SwsContext *sws_context = sws_getContext(codec_context->width,
+                                                        codec_context->height,
+                                                        codec_context->pix_fmt,
+                                                        codec_context->width,
+                                                        codec_context->height,
+                                                        AV_PIX_FMT_RGB24,
+                                                        SWS_BILINEAR,
+                                                        NULL,
+                                                        NULL,
+                                                        NULL);
+        assert(sws_context != NULL);
+
+        AVFrame *frame_rgb = allocate_rgb_image(codec_context);
+        assert(frame_rgb != NULL);
+
+        int32_t status;
+        int32_t save_status;
+        int32_t saved_frames = 0;
+        uint32_t copied_bytes = 0;
+        const uint32_t bytes_per_row = 3*frame_rgb->width;
+        const uint32_t bytes_per_frame = bytes_per_row*frame_rgb->height;
+        int32_t current_frame_index = 0;
+        int32_t out_frame_index = 0;
+        int64_t prev_pts = 0;
+        
+        for (;
+             out_frame_index < num_requested_frames;
+             ++out_frame_index) {
+                printf("loop start\n");
+
+                int32_t desired_frame_num = frame_numbers[out_frame_index];
+                assert((desired_frame_num >= current_frame_index) &&
+                       (desired_frame_num >= 0));
+
+                /* Loop frames instead of aborting if we asked for too many. */
+                printf("Desired frame: %d Current frame: %d Total frames: %d",desired_frame_num,current_frame_index,vid_ctx->nb_frames);
+                if (desired_frame_num > vid_ctx->nb_frames) {
+                        printf("WARNING: reached end of video");
+                        save_status = save_frame(vid_ctx,output_dir,saved_frames);
+                        goto out_free_frame_rgb_and_sws;
+                }
+                
+                while (current_frame_index <= desired_frame_num) {
+                        status = receive_frame(vid_ctx);
+                        printf("received frames\n");
+                        if (status==VID_DECODE_EOF){
+                                printf("WARNING: Reached end of file");
+                                return;
+                        }
+
+                        assert(status == VID_DECODE_SUCCESS);
+                        /**
+                         * NOTE(brendan): Only advance the frame index if the
+                         * current frame's PTS is greater than the previous
+                         * frame's PTS. This is to workaround an FFmpeg oddity
+                         * where the first frame decoded gets duplicated.
+                         */
+                        if (vid_ctx->frame->pts > prev_pts) {
+                                ++current_frame_index;
+                                prev_pts = vid_ctx->frame->pts;
+                        }
+                        printf("increased frame index \n");
+
+                }
+                //reached desired frame
+                printf("reached desired frame");
+                save_status = save_frame(vid_ctx,output_dir,saved_frames);
+                saved_frames++;
+
+        printf("returning\n");
         }
 
 out_free_frame_rgb_and_sws:

@@ -357,6 +357,119 @@ clean_up:
 }
 
 static PyObject *
+saveframes_frame_nums(PyObject *UNUSED(dummy), PyObject *args, PyObject *kw)
+{
+        PyObject *result = NULL;
+        const char *video_bytes = NULL;
+        const char *output_dir = NULL;
+        Py_ssize_t in_size_bytes = 0;
+        PyObject *frame_nums = NULL;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        /* NOTE(brendan): should_seek must be int (not bool) because Python. */
+        int32_t should_seek = false;
+        static char *kwlist[] = {"encoded_video",
+                                 "frame_nums",
+                                 "width",
+                                 "height",
+                                 "should_seek",
+                                 "output_dir",
+                                 0};
+
+        if (!PyArg_ParseTupleAndKeywords(args,
+                                         kw,
+                                         "y#|$OIIpy#:saveframes_frame_nums",
+                                         kwlist,
+                                         &video_bytes,
+                                         &in_size_bytes,
+                                         &frame_nums,
+                                         &width,
+                                         &height,
+                                         &should_seek,
+                                         &output_dir))
+                return NULL;
+
+        if (!PySequence_Check(frame_nums)) {
+                PyErr_SetString(PyExc_TypeError,
+                                "frame_nums needs to be a sequence");
+                return NULL;
+        }
+
+        struct video_stream_context vid_ctx;
+        struct buffer_data input_buf = {.ptr = video_bytes,
+                                        .offset_bytes = 0,
+                                        .total_size_bytes = in_size_bytes};
+        int32_t status = setup_vid_stream_context(&vid_ctx, &input_buf);
+
+        bool is_size_dynamic = get_vid_width_height(&width,
+                                                    &height,
+                                                    vid_ctx.codec_context);
+
+        /**
+         * TODO(brendan): There is a hole in the logic here, where a bad status
+         * could be returned from `setup_vid_stream_context`, but the width and
+         * height from `codec_context` is still used to allocate `frames`.
+         *
+         * It is safer to pass the width and height as arguments, if there is a
+         * possibility that videos in the dataset have no video stream.
+         */
+        const Py_ssize_t num_frames = PySequence_Size(frame_nums);
+        PyByteArrayObject *frames = alloc_pyarray(1);
+
+
+
+        if (status != LOADVID_SUCCESS) {
+                if (status == LOADVID_ERR_STREAM_INDEX)
+                        return (PyObject *)frames;
+
+                return NULL;
+        }
+
+        int32_t *frame_nums_buf = PyMem_RawMalloc(num_frames*sizeof(int32_t));
+        if (frame_nums_buf == NULL)
+                return PyErr_NoMemory();
+
+        for (int32_t i = 0;
+             i < num_frames;
+             ++i) {
+                PyObject *item = PySequence_GetItem(frame_nums, i);
+                if (item == NULL)
+                        goto clean_up;
+
+                frame_nums_buf[i] = PyLong_AsLong(item);
+                Py_DECREF(item);
+                if (PyErr_Occurred())
+                        goto clean_up;
+        }
+
+        result = (PyObject *)frames;
+
+        save_video_from_frame_nums(&vid_ctx,
+                                     num_frames,
+                                     frame_nums_buf,
+                                     should_seek,
+                                     (uint8_t *)(output_dir));
+        PyMem_RawFree(frame_nums_buf);
+clean_up:
+        clean_up_vid_ctx(&vid_ctx);
+
+        if (result != (PyObject *)frames) {
+                Py_CLEAR(frames);
+                return result;
+        }
+
+        if (!is_size_dynamic)
+                return (PyObject *)frames;
+
+        result = Py_BuildValue("Oii", frames, width, height);
+        Py_DECREF(frames);
+
+        return result;
+}
+
+
+
+static PyObject *
 loadvid(PyObject *UNUSED(dummy), PyObject *args, PyObject *kw)
 {
         PyObject *result = NULL;
@@ -470,6 +583,13 @@ static PyMethodDef lintel_methods[] = {
          (PyCFunction)loadvid_frame_nums,
          METH_VARARGS | METH_KEYWORDS,
          PyDoc_STR("loadvid_frame_nums(encoded_video, frame_nums, width, height, should_seek) -> "
+                   "decoded video ByteArray object or\n"
+                   "tuple(decoded video ByteArray object, width, height)\n"
+                   "if width and height are not passed as arguments.")},
+        {"saveframes_frame_nums",
+         (PyCFunction)saveframes_frame_nums,
+         METH_VARARGS | METH_KEYWORDS,
+         PyDoc_STR("saveframes_frame_nums(encoded_video, output_dir, frame_nums, width, height, should_seek) -> "
                    "decoded video ByteArray object or\n"
                    "tuple(decoded video ByteArray object, width, height)\n"
                    "if width and height are not passed as arguments.")},
