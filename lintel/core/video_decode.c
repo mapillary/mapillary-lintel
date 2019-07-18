@@ -96,25 +96,19 @@ save_frame(struct video_stream_context *vid_ctx, uint8_t *output_dir, int32_t sa
     ret = avcodec_send_frame(jpeg_codec_ctx,frame);
     if (ret < 0)
     {
-        char error_code[100];
-        sprintf(error_code, "%d", ret);
-        printf(error_code);
-        printf("Error sending frame\n");
+        printf("Error %d sending frame\n",ret);
         exit(1);
     }
     ret = avcodec_receive_packet(jpeg_codec_ctx,&pkt);
     if (ret < 0)
     {
-        char error_code[100];
-        sprintf(error_code, "%d", ret);
-        printf(error_code);
-        printf("Error receiving frame\n");
+        printf("Error %d receiving frame\n",ret);
         exit(1);
     }
 
     char output_name[200];
     sprintf(output_name,"%s/frame_%d.jpg",output_dir,saved_frames);
-    printf(output_name);
+    printf("%s", output_name);
     FILE* f = fopen(&output_name, "wb");
     fwrite(pkt.data, 1, pkt.size, f);
     av_free_packet(&pkt);
